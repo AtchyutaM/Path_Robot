@@ -1,85 +1,87 @@
-# app.py
-# Streamlit UI for RL Path Planner, importing the find_path function from a separate module
-
-import streamlit as st
+# findpath.py
+import torch
 import numpy as np
-from PIL import Image, ImageDraw
-import math
+import torch.nn as nn
 
-# Import the RL sub-agent
-from findpath import find_path
+# ─── Constants ────────────────────────────────────────────────────────────────
+GRID_SIZE = 10
+MODEL_PATH = "dqn_model.pth"   # trained weights from train.py
+ACTIONS = [(-1,0),(1,0),(0,-1),(0,1)]
+ACTION_IDX = {a:i for i,a in enumerate(ACTIONS)}
+MAX_STEPS = 100
 
-# ---- Streamlit App ----
-st.title("RL Path Planner Demo")
-st.markdown("Select grid cells to place obstacles, then click 'Find Path'.")
+# ─── Network ──────────────────────────────────────────────────────────────────
+class DQN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+        self.fc = nn.Sequential(
+            nn.Flatten(),                    # 32 * GRID_SIZE * GRID_SIZE
+            nn.Linear(32 * GRID_SIZE * GRID_SIZE, 128),
+            nn.ReLU(),
+            nn.Linear(128, len(ACTIONS))
+        )
 
-# Sidebar controls
-GRID     = st.sidebar.slider("Grid size", 5, 30, 10)
-CELL_PX  = st.sidebar.slider("Cell size (px)", 20, 40, 30)
-START    = tuple(st.sidebar.slider("Start (y, x)", 0, GRID-1, (0, 0)))
-GOAL     = tuple(st.sidebar.slider("Goal  (y, x)", 0, GRID-1, (GRID-1, GRID-1)))
-FIND_BTN = st.sidebar.button("Find Path")
+    def forward(self, x):
+        x = self.conv(x)
+        return self.fc(x)
 
-# Initialize or reset mask
-if "mask" not in st.session_state or st.session_state.mask.shape != (GRID, GRID):
-    st.session_state.mask = np.zeros((GRID, GRID), dtype=bool)
+# ─── Utilities ────────────────────────────────────────────────────────────────
+def state_to_tensor(state, goal, obstacles:set[tuple[int,int]]):
+    # Build three GRID×GRID channels
+    agent  = np.zeros((GRID_SIZE,GRID_SIZE), dtype=np.float32)
+    goal_m = np.zeros((GRID_SIZE,GRID_SIZE), dtype=np.float32)
+    obs_m  = np.zeros((GRID_SIZE,GRID_SIZE), dtype=np.float32)
 
-# Render grid of checkboxes for obstacles
-st.markdown("### Obstacle Grid")
-for y in range(GRID):
-    cols = st.columns(GRID)
-    for x, col in enumerate(cols):
-        with col:
-            checked = st.checkbox("", key=f"cell_{y}_{x}", value=st.session_state.mask[y, x])
-            st.session_state.mask[y, x] = checked
+    agent [state ] = 1.0
+    goal_m[goal  ] = 1.0
+    for (r,c) in obstacles:
+        obs_m[r,c] = 1.0
 
-# Display raw mask
-mask = st.session_state.mask.astype(int)
-st.markdown("**Current Obstacle Mask**")
-st.write(mask)
+    stacked = np.stack([agent, goal_m, obs_m], axis=0)  # shape=(3,GRID,GRID)
+    return torch.tensor(stacked, dtype=torch.float32).unsqueeze(0)  # (1,3,GRID,GRID)
 
-# When user clicks Find Path
-if FIND_BTN:
-    # Build obstacles set of (y,x)
-    obstacles = {(y, x) for y in range(GRID) for x in range(GRID) if mask[y, x] == 1}
-    # Call RL sub-agent
-    path = find_path(obstacles, START, GOAL)
+def is_valid(pos, obstacles):
+    r,c = pos
+    return 0<=r<GRID_SIZE and 0<=c<GRID_SIZE and pos not in obstacles
 
-    # Create drawing canvas
-    img = Image.new("RGB", (GRID * CELL_PX, GRID * CELL_PX), "white")
-    draw = ImageDraw.Draw(img)
+# ─── Path‑finding ─────────────────────────────────────────────────────────────
+def find_path(obstacles:set[tuple[int,int]],
+              start: tuple[int,int],
+              goal:  tuple[int,int]) -> list[tuple[int,int]]:
 
-    # Draw grid lines
-    for i in range(GRID + 1):
-        draw.line([(i*CELL_PX, 0), (i*CELL_PX, GRID*CELL_PX)], fill="gray")
-        draw.line([(0, i*CELL_PX), (GRID*CELL_PX, i*CELL_PX)], fill="gray")
+    # 1) Load the trained model
+    model = DQN()
+    model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
+    model.eval()
 
-    # Draw obstacles in red
-    for (y, x) in obstacles:
-        rect = [x*CELL_PX, y*CELL_PX, (x+1)*CELL_PX, (y+1)*CELL_PX]
-        draw.rectangle(rect, fill="red")
+    # 2) Greedy rollout
+    path = [start]
+    state = start
 
-    # Draw path in blue with arrows
-    if path and len(path) > 1:
-        arrow_size = CELL_PX * 0.3
-        for (y0, x0), (y1, x1) in zip(path, path[1:]):
-            x0p, y0p = x0*CELL_PX + CELL_PX/2, y0*CELL_PX + CELL_PX/2
-            x1p, y1p = x1*CELL_PX + CELL_PX/2, y1*CELL_PX + CELL_PX/2
-            # line segment
-            draw.line([(x0p, y0p), (x1p, y1p)], fill="blue", width=3)
-            # arrowhead
-            angle = math.atan2(y1p - y0p, x1p - x0p)
-            left = (x1p - arrow_size*math.cos(angle - math.pi/6),
-                    y1p - arrow_size*math.sin(angle - math.pi/6))
-            right = (x1p - arrow_size*math.cos(angle + math.pi/6),
-                     y1p - arrow_size*math.sin(angle + math.pi/6))
-            draw.polygon([(x1p, y1p), left, right], fill="blue")
-    elif path:
-        # single-cell path: mark with blue dot
-        y, x = path[0]
-        cx, cy = x*CELL_PX + CELL_PX/2, y*CELL_PX + CELL_PX/2
-        r = CELL_PX * 0.2
-        draw.ellipse([cx-r, cy-r, cx+r, cy+r], fill="blue")
+    for _ in range(MAX_STEPS):
+        # a) encode input
+        st_t = state_to_tensor(state, goal, obstacles)
+        # b) forward pass
+        with torch.no_grad():
+            q_vals = model(st_t)
+        # c) pick best action
+        best = ACTIONS[torch.argmax(q_vals).item()]
+        # d) step
+        nxt = (state[0]+best[0], state[1]+best[1])
 
-    # Display result
-    st.image(img, caption="Obstacles (red) and Path (blue)", use_column_width=True)
+        # e) stop if invalid or loop
+        if not is_valid(nxt, obstacles) or nxt in path:
+            break
+
+        path.append(nxt)
+        if nxt == goal:
+            break
+        state = nxt
+
+    return path

@@ -1,146 +1,200 @@
 # train.py
-# Script to train a DQN agent on a grid navigation task and save the trained model
+# Script to train a DQN agent on random 10×10 grids with obstacles, then plot performance
+
+import random
+from collections import deque
 
 import numpy as np
-import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from collections import deque
+import matplotlib.pyplot as plt
 
-# ---- Grid setup ----
+# ─── Environment Setup ────────────────────────────────────────────────────────
 GRID_SIZE = 10
-START = (0, 0)
-GOAL = (9, 9)
-OBSTACLES = {
-    (1, 2), (1, 3), (2, 3), (3, 3),
-    (4, 1), (4, 2), (4, 3), (5, 5),
-    (6, 5), (7, 5), (7, 6), (7, 7)
-}
-ACTIONS = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+START     = (0, 0)
+GOAL      = (GRID_SIZE - 1, GRID_SIZE - 1)
+
+# Actions: up, down, left, right
+ACTIONS    = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 ACTION_IDX = {a: i for i, a in enumerate(ACTIONS)}
 
-# ---- DQN Model ----
+# ─── Obstacle Sampling ─────────────────────────────────────────────────────────
+NUM_WALLS = 15  # number of random obstacles per episode
+
+def sample_obstacles(num_walls: int):
+    """Uniformly sample `num_walls` obstacle cells, excluding start & goal."""
+    cells = [(r, c) for r in range(GRID_SIZE) for c in range(GRID_SIZE)]
+    cells.remove(START)
+    cells.remove(GOAL)
+    return set(random.sample(cells, num_walls))
+
+# ─── Validity Check ───────────────────────────────────────────────────────────
+def is_valid(pos, obstacles):
+    r, c = pos
+    return (0 <= r < GRID_SIZE and
+            0 <= c < GRID_SIZE and
+            pos not in obstacles)
+
+# ─── State Encoding ──────────────────────────────────────────────────────────
+def state_to_tensor(state, goal, obstacles):
+    """
+    Build a 3×GRID×GRID tensor:
+      - Channel 0: agent position (1.0)
+      - Channel 1: goal position  (1.0)
+      - Channel 2: obstacle mask  (1.0 where wall)
+    """
+    agent  = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+    goal_m = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+    obs_m  = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+
+    agent[state] = 1.0
+    goal_m[goal] = 1.0
+    for (r, c) in obstacles:
+        obs_m[r, c] = 1.0
+
+    stacked = np.stack([agent, goal_m, obs_m], axis=0)
+    return torch.tensor(stacked, dtype=torch.float32).unsqueeze(0)  # shape (1,3,GRID,GRID)
+
+# ─── DQN Network (CNN) ────────────────────────────────────────────────────────
 class DQN(nn.Module):
     def __init__(self):
-        super(DQN, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(GRID_SIZE * GRID_SIZE, 128),
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),  # -> (16×10×10)
             nn.ReLU(),
-            nn.Linear(128, 64),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1), # -> (32×10×10)
             nn.ReLU(),
-            nn.Linear(64, len(ACTIONS))
+        )
+        self.fc = nn.Sequential(
+            nn.Flatten(),                                # 32*10*10 = 3200
+            nn.Linear(32 * GRID_SIZE * GRID_SIZE, 128),
+            nn.ReLU(),
+            nn.Linear(128, len(ACTIONS))                 # 4 Q‑values
         )
 
     def forward(self, x):
-        return self.net(x)
+        x = self.conv(x)
+        return self.fc(x)
 
-# ---- Utility Functions ----
-def is_valid(pos):
-    r, c = pos
-    return 0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE and pos not in OBSTACLES
+# ─── Hyperparameters ──────────────────────────────────────────────────────────
+EPISODES           = 2000
+MAX_STEPS          = 100
+GAMMA              = 0.99
+LR                 = 1e-3
+EPS_START, EPS_END = 1.0, 0.05
+EPS_DECAY          = 0.995
+MEMORY_SIZE        = 5000
+BATCH_SIZE         = 64
+TARGET_UPDATE_FREQ = 200
 
+# ─── Setup Models & Optimizer ─────────────────────────────────────────────────
+device      = torch.device("cpu")
+policy_net = DQN().to(device)
+target_net = DQN().to(device)
+target_net.load_state_dict(policy_net.state_dict())
+target_net.eval()
 
-def state_to_tensor(state, goal):
-    grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
-    grid[state] = 1.0
-    grid[goal] = 0.5
-    return torch.tensor(grid.flatten(), dtype=torch.float32).unsqueeze(0)
+optimizer = optim.Adam(policy_net.parameters(), lr=LR)
+loss_fn   = nn.MSELoss()
+memory    = deque(maxlen=MEMORY_SIZE)
 
-
-def choose_action(state_tensor, epsilon, model):
-    if random.random() < epsilon:
-        return random.choice(ACTIONS)
-    with torch.no_grad():
-        q_vals = model(state_tensor)
-    return ACTIONS[torch.argmax(q_vals).item()]
-
-# ---- Hyperparameters ----
-gamma = 0.99
-alpha = 0.001
-epsilon_start = 1.0
-epsilon_end = 0.05
-epsilon_decay = 0.995
-EPISODES = 1000
-MAX_STEPS = 100
-TARGET_UPDATE_FREQ = 100
-BATCH_SIZE = 32
-MEMORY_SIZE = 5000
-
-# ---- Initialization ----n
-device = torch.device("cpu")
-model = DQN().to(device)
-target_model = DQN().to(device)
-target_model.load_state_dict(model.state_dict())
-target_model.eval()
-optimizer = optim.Adam(model.parameters(), lr=alpha)
-loss_fn = nn.MSELoss()
-memory = deque(maxlen=MEMORY_SIZE)
-
-epsilon = epsilon_start
+epsilon            = EPS_START
+step_ctr           = 0
 reward_per_episode = []
-step_counter = 0
 
-# ---- Training Loop ----
-for episode in range(EPISODES):
-    state = START
-    total_reward = 0
-    for step in range(MAX_STEPS):
-        state_tensor = state_to_tensor(state, GOAL).to(device)
-        action = choose_action(state_tensor, epsilon, model)
+# ─── Training Loop ──────────────────────────────────────────────────────────
+for ep in range(1, EPISODES + 1):
+    obstacles = sample_obstacles(NUM_WALLS)
+    state     = START
+    total_r   = 0
+
+    for _ in range(MAX_STEPS):
+        st_t = state_to_tensor(state, GOAL, obstacles).to(device)
+
+        # ε-greedy action selection
+        if random.random() < epsilon:
+            action = random.choice(ACTIONS)
+        else:
+            with torch.no_grad():
+                qs = policy_net(st_t)
+            action = ACTIONS[torch.argmax(qs).item()]
+
+        # Step environment
         next_state = (state[0] + action[0], state[1] + action[1])
-
-        # Compute reward and validity
-        if not is_valid(next_state):
-            next_state = state
+        if not is_valid(next_state, obstacles):
             reward = -10
+            next_state = state
         elif next_state == GOAL:
             reward = 20
         else:
             reward = -1
 
-        done = (next_state == GOAL)
-        total_reward += reward
+        done    = (next_state == GOAL)
+        total_r += reward
 
         # Store transition
         memory.append((state, action, reward, next_state, done))
         state = next_state
 
-        # Sample and update
+        # Learning step
         if len(memory) >= BATCH_SIZE:
             batch = random.sample(memory, BATCH_SIZE)
-            states, actions, rewards, next_states, dones = zip(*batch)
+            states, actions_, rewards, next_states, dones = zip(*batch)
 
-            state_tensors = torch.cat([state_to_tensor(s, GOAL) for s in states]).to(device)
-            next_state_tensors = torch.cat([state_to_tensor(ns, GOAL) for ns in next_states]).to(device)
+            s_batch  = torch.cat([state_to_tensor(s, GOAL, obstacles) for s in states]).to(device)
+            ns_batch = torch.cat([state_to_tensor(ns, GOAL, obstacles) for ns in next_states]).to(device)
 
-            q_values = model(state_tensors)
-            next_q_values = target_model(next_state_tensors)
+            q_vals = policy_net(s_batch)
+            q_next = target_net(ns_batch).detach()
+            targets = q_vals.clone()
 
-            targets = q_values.clone().detach()
             for i in range(BATCH_SIZE):
-                a_idx = ACTION_IDX[actions[i]]
-                max_next_q = torch.max(next_q_values[i]).item()
-                target_val = rewards[i] + gamma * max_next_q * (0 if dones[i] else 1)
-                targets[i][a_idx] = target_val
+                a_idx       = ACTION_IDX[actions_[i]]
+                best_next_q = torch.max(q_next[i]).item()
+                tgt_val     = rewards[i] + GAMMA * best_next_q * (0.0 if dones[i] else 1.0)
+                targets[i, a_idx] = tgt_val
 
-            loss = loss_fn(q_values, targets)
+            loss = loss_fn(q_vals, targets)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
         # Update target network periodically
-        step_counter += 1
-        if step_counter % TARGET_UPDATE_FREQ == 0:
-            target_model.load_state_dict(model.state_dict())
+        step_ctr += 1
+        if step_ctr % TARGET_UPDATE_FREQ == 0:
+            target_net.load_state_dict(policy_net.state_dict())
 
         if done:
             break
 
-    # Decay epsilon
-    epsilon = max(epsilon_end, epsilon * epsilon_decay)
-    reward_per_episode.append(total_reward)
+    # Decay epsilon and record reward
+    epsilon = max(EPS_END, epsilon * EPS_DECAY)
+    reward_per_episode.append(total_r)
 
-# ---- Save the trained model ----
-torch.save(model.state_dict(), 'dqn_model.pth')
-print('Training complete. Model saved to dqn_model.pth')
+    if ep % 100 == 0:
+        print(f"Episode {ep}/{EPISODES}  Reward: {total_r:.1f}  ε: {epsilon:.3f}")
+
+# ─── Save the trained model ────────────────────────────────────────────────────
+torch.save(policy_net.state_dict(), "dqn_model.pth")
+print("Training complete — model saved to dqn_model.pth")
+
+# ─── Plot Training Performance ────────────────────────────────────────────────
+episodes = list(range(1, EPISODES + 1))
+
+plt.figure(figsize=(10, 5))
+plt.plot(episodes, reward_per_episode, label='Reward per Episode')
+plt.xlabel('Episode')
+plt.ylabel('Total Reward')
+plt.title('DQN Training: Reward per Episode')
+plt.grid(True)
+plt.legend()
+
+# Moving average (window = 100)
+window = 100
+if EPISODES >= window:
+    mov_avg = np.convolve(reward_per_episode, np.ones(window)/window, mode='valid')
+    plt.plot(range(window, EPISODES + 1), mov_avg, label=f'{window}-Episode Moving Avg')
+    plt.legend()
+
+plt.show()
