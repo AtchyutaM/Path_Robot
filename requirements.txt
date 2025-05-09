@@ -4,3 +4,5 @@ numpy
 pillow
 torch
 matplotlib
+tqdm
+gym

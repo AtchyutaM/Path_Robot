@@ -28,9 +28,10 @@ for y in range(GRID):
     for x, col in enumerate(cols):
         with col:
             checked = st.checkbox(
-                label="",
+                label=f"Obstacle at {y},{x}",
                 key=f"cell_{y}_{x}",
                 value=st.session_state.mask[y, x]
+                label_visibility="hidden"               # visually hidden but present for screen‑readers
             )
             st.session_state.mask[y, x] = checked
 
@@ -90,4 +91,4 @@ if compute:
         draw.ellipse([cx-r, cy-r, cx+r, cy+r], fill="blue")
 
     # 5) Display the result
-    st.image(img, caption="Obstacles (red) and Path (blue)", use_column_width=True)
+    st.image(img, caption="Obstacles (red) and Path (blue)", use_container_width=True)
