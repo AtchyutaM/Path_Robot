@@ -30,7 +30,7 @@ for y in range(GRID):
             checked = st.checkbox(
                 label=f"Obstacle at {y},{x}",
                 key=f"cell_{y}_{x}",
-                value=st.session_state.mask[y, x]
+                value=st.session_state.mask[y, x],
                 label_visibility="hidden"               # visually hidden but present for screen‑readers
             )
             st.session_state.mask[y, x] = checked
