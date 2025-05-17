@@ -8,7 +8,7 @@ import math
 from findpath import find_path   # <-- make sure findpath.py is in the same folder
 
 # ─── STREAMLIT UI ──────────────────────────────────────────────────────────────
-st.title("RL Path Planner (Cell Selector)")
+st.title("RL based Path Planner (Cell Selector)")
 
 # Sidebar controls
 GRID    = st.sidebar.slider("Grid size", 5, 30, 10)
