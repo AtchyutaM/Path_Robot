@@ -18,9 +18,9 @@ GRID_SIZE      = 10
 START          = (0, 0)
 GOAL           = (9, 9)
 ACTIONS        = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-N_ENVS         = 4
+N_ENVS         = 16
 
-EPISODES       = 10000     # increased to 10k episodes
+EPISODES       = 20000     # increased to 20k episodes
 MAX_STEPS      = 100
 GAMMA          = 0.99
 LR             = 1e-3
@@ -28,7 +28,7 @@ LR             = 1e-3
 EPS_START      = 1.0
 EPS_END        = 0.05      # final ε
 REPLAY_SIZE    = 5000
-BATCH_SIZE     = 64
+BATCH_SIZE     = 128
 TARGET_UPDATE  = 200
 
 DEMO_PATH      = "demos.pt"
@@ -83,8 +83,8 @@ class GridEnv(gym.Env):
          - Compute obstacle_ratio linearly from 15%→50% based on CURRENT_EP/EPISODES
          - Try up to 4 samples; if unsolvable, drop ratio by 5% and retry
         """
-        # curriculum: from 0.15 → 0.50
-        base_ratio = 0.15 + (0.50 - 0.15) * min(CURRENT_EP, EPISODES) / EPISODES
+        # curriculum: from 0.15 → 0.70
+        base_ratio = 0.15 + (0.70 - 0.15) * min(CURRENT_EP, EPISODES) / EPISODES
         ratio      = base_ratio
         attempts   = 0
 
@@ -196,6 +196,13 @@ def main():
     target_net = DuelingDQN().to(device)
     target_net.load_state_dict(policy_net.state_dict())
     target_net.eval()
+
+    # Only JIT‐compile if we actually have a GPU
+    if device.type == "cuda":
+        policy_net = torch.compile(policy_net)
+        target_net = torch.compile(target_net)
+    else:
+        print("⚠️ Skipping torch.compile on CPU (no MSVC compiler)")
 
     optimizer = optim.Adam(policy_net.parameters(), lr=LR)
     replay    = deque(maxlen=REPLAY_SIZE)
@@ -322,7 +329,7 @@ def main():
         rewards_hist.append(avg_reward)
 
         # detailed log every 10 eps
-        if ep % 10 == 0:
+        if ep % 200 == 0:
             print(
                 f"[Ep {ep:5d}] "
                 f"ε={epsilon:.3f} | "
